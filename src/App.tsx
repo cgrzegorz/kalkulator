@@ -1,11 +1,14 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import './App.css'
+import TechnicalCalculations from './TechnicalCalculations'
 
 type SupplyType = 'three-phase' | 'single-phase'
 type CircuitType = 'lighting' | 'sockets' | 'intercom' | 'gate' | 'fridge' | 'custom'
 type BreakerCurve = 'B' | 'C'
 type InstallationMethod = 'A2' | 'B2' | 'C' | 'E'
 type CableType = 'N2XH' | 'PVC'
+type LpsClass = 'I' | 'II' | 'III' | 'IV'
+type CalculatorSection = 'quick' | 'circuits' | 'cable' | 'lightning' | 'wlz'
 
 type Circuit = {
   id: number
@@ -17,6 +20,40 @@ type Circuit = {
 
 const POWER_FACTOR = 0.93
 const DEMAND_FACTOR = 0.7
+const lpsSpacing: Record<LpsClass, number> = {
+  I: 10,
+  II: 10,
+  III: 15,
+  IV: 20,
+}
+const sectionMeta: Record<CalculatorSection, { eyebrow: string; title: string; description: string }> = {
+  quick: {
+    eyebrow: 'Moce rozdzielnicy',
+    title: 'Bilans Pi, kj, Ps i In',
+    description: 'Wpisz moc zainstalowaną i przyjmij współczynnik jednoczesności do wyznaczenia Ps oraz In.',
+  },
+  circuits: {
+    eyebrow: 'Odbiorniki i obwody',
+    title: 'Lista obwodów',
+    description: 'Dodaj odbiorniki, policz moc zainstalowaną i podsumuj prądy obliczeniowe.',
+  },
+  cable: {
+    eyebrow: 'Dobór przewodu',
+    title: 'Przewód i zabezpieczenie',
+    description: 'Dobierz zabezpieczenie oraz minimalny przekrój przewodu dla urządzenia.',
+  },
+  lightning: {
+    eyebrow: 'Instalacja odgromowa',
+    title: 'Przewody odprowadzające',
+    description: 'Oszacuj liczbę połączeń instalacji odgromowej z układem uziemiającym.',
+  },
+  wlz: {
+    eyebrow: 'Bilans WLZ',
+    title: 'Bilans mocy i dobór WLZ',
+    description: 'Policz moc szczytową, prąd In oraz warunki doboru przewodu zasilającego.',
+  },
+}
+const calculatorSections = Object.keys(sectionMeta) as CalculatorSection[]
 const breakerRatings = [6, 10, 13, 16, 20, 25, 32, 40, 50, 63, 80, 100, 125, 160, 200, 250, 315, 400, 500, 630]
 const n2xhCableRows = [
   { section: '1,5', A2: [18.5, 16.5], B2: [22, 19.5], C: [24, 22], E: [26, 23] },
@@ -67,8 +104,7 @@ const circuitPresets: Record<CircuitType, { name: string; power: number | null }
 }
 
 const initialCircuits: Circuit[] = [
-  { id: 1, type: 'lighting', power: '0.4', quantity: '1', supply: 'single-phase' },
-  { id: 2, type: 'sockets', power: '0.2', quantity: '1', supply: 'single-phase' },
+
 ]
 
 function getCircuitPower(circuit: Circuit) {
@@ -152,31 +188,52 @@ function Icon({
 function App() {
   const [circuits, setCircuits] = useState<Circuit[]>(initialCircuits)
   const [activeView, setActiveView] = useState<'calculator' | 'formulas'>('calculator')
+  const [activeSection, setActiveSection] = useState<CalculatorSection>('quick')
   const [quickPower, setQuickPower] = useState('')
+  const [quickSimultaneityFactor, setQuickSimultaneityFactor] = useState(String(DEMAND_FACTOR))
   const [quickSupply, setQuickSupply] = useState<SupplyType>('three-phase')
   const [devicePower, setDevicePower] = useState('')
   const [deviceSupply, setDeviceSupply] = useState<SupplyType>('single-phase')
   const [breakerCurve, setBreakerCurve] = useState<BreakerCurve>('B')
+  const [breakerRating, setBreakerRating] = useState(16)
   const [cableType, setCableType] = useState<CableType>('N2XH')
   const [installationMethod, setInstallationMethod] = useState<InstallationMethod>('B2')
+  const [buildingSideA, setBuildingSideA] = useState('')
+  const [buildingSideB, setBuildingSideB] = useState('')
+  const [lpsClass, setLpsClass] = useState<LpsClass>('III')
 
   const quickPowerWatts = (Number(quickPower) || 0) * 1000
-  const quickDemandPower = quickPowerWatts * DEMAND_FACTOR
+  const quickDemandPower = quickPowerWatts * (Number(quickSimultaneityFactor) || 0)
   const quickNominalCurrent = getCurrent(quickDemandPower, quickSupply)
   const devicePowerWatts = (Number(devicePower) || 0) * 1000
   const deviceCurrent = getCurrent(devicePowerWatts, deviceSupply)
-  const breakerRating = deviceCurrent > 0
-    ? breakerRatings.find((rating) => rating >= deviceCurrent)
-    : undefined
   const loadedCores = deviceSupply === 'single-phase' ? 2 : 3
   const cableRows = cableType === 'N2XH' ? n2xhCableRows : pvcCableRows
-  const selectedCable = breakerRating
-    ? cableRows.find((row) => {
-      const capacity = row[installationMethod][loadedCores - 2]
-      return capacity !== null && capacity >= breakerRating
-    })
-    : undefined
+  const selectedCable = cableRows.find((row) => {
+    const capacity = row[installationMethod][loadedCores - 2]
+    return capacity !== null && capacity >= breakerRating
+  })
   const selectedCableCapacity = selectedCable?.[installationMethod][loadedCores - 2]
+  const breakerCoversLoad = deviceCurrent <= breakerRating
+  const sideA = Number(buildingSideA) || 0
+  const sideB = Number(buildingSideB) || 0
+  const buildingPerimeter = 2 * (sideA + sideB)
+  const preferredLpsSpacing = lpsSpacing[lpsClass]
+  const minimumDownConductors = buildingPerimeter > 0
+    ? Math.max(2, Math.ceil(buildingPerimeter / preferredLpsSpacing))
+    : 0
+  const cornerAwareDownConductors = sideA > 0 && sideB > 0
+    ? 2 * Math.ceil(sideA / preferredLpsSpacing) + 2 * Math.ceil(sideB / preferredLpsSpacing)
+    : 0
+  const averageDownConductorSpacing = minimumDownConductors > 0
+    ? buildingPerimeter / minimumDownConductors
+    : 0
+
+  const openSection = (section: CalculatorSection) => {
+    setActiveView('calculator')
+    setActiveSection(section)
+    window.history.replaceState(null, '', `#/${section}`)
+  }
 
   const totals = useMemo(() => {
     const installedPower = circuits.reduce((sum, circuit) => sum + getCircuitPower(circuit), 0)
@@ -193,6 +250,23 @@ function App() {
       nominalCurrent: getCurrent(demandPower, 'three-phase'),
     }
   }, [circuits])
+  const currentSectionMeta = sectionMeta[activeSection]
+
+  useEffect(() => {
+    const syncSectionFromHash = () => {
+      const section = window.location.hash.replace(/^#\/?/, '') as CalculatorSection
+
+      if (calculatorSections.includes(section)) {
+        setActiveView('calculator')
+        setActiveSection(section)
+      }
+    }
+
+    syncSectionFromHash()
+    window.addEventListener('hashchange', syncSectionFromHash)
+
+    return () => window.removeEventListener('hashchange', syncSectionFromHash)
+  }, [])
 
   const addCircuit = () => {
     setCircuits((current) => [
@@ -222,17 +296,47 @@ function App() {
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark"><Icon name="bolt" size={22} /></span>
-          
+          <span>
+            Power<span>Desk</span>
+          </span>
         </div>
 
         <nav className="main-nav" aria-label="Nawigacja">
-          <p>Menu główne</p>
+          <p>Moduły obliczeń</p>
           <button
-            className={activeView === 'calculator' ? 'active' : ''}
-            onClick={() => setActiveView('calculator')}
+            className={activeView === 'calculator' && activeSection === 'quick' ? 'active' : ''}
+            onClick={() => openSection('quick')}
+          >
+            <Icon name="bolt" />
+            Moce rozdzielnicy
+          </button>
+          <button
+            className={activeView === 'calculator' && activeSection === 'circuits' ? 'active' : ''}
+            onClick={() => openSection('circuits')}
+          >
+            <Icon name="list" />
+            Odbiorniki i obwody
+          </button>
+          <button
+            className={activeView === 'calculator' && activeSection === 'cable' ? 'active' : ''}
+            onClick={() => openSection('cable')}
           >
             <Icon name="calculator" />
-            Kalkulator
+            Dobór przewodu
+          </button>
+          <button
+            className={activeView === 'calculator' && activeSection === 'lightning' ? 'active' : ''}
+            onClick={() => openSection('lightning')}
+          >
+            <Icon name="chart" />
+            Instalacja odgromowa
+          </button>
+          <button
+            className={activeView === 'calculator' && activeSection === 'wlz' ? 'active' : ''}
+            onClick={() => openSection('wlz')}
+          >
+            <Icon name="settings" />
+            Bilans WLZ
           </button>
           {/* <button
             className={activeView === 'formulas' ? 'active' : ''}
@@ -260,24 +364,36 @@ function App() {
           <>
             <header className="page-header">
               <div>
-                <span className="eyebrow">Projekt elektryczny</span>
-                <h1>Kalkulator obciążeń</h1>
-                <p>Oblicz prądy obwodów i parametry przyłącza instalacji.</p>
+                <span className="eyebrow">{currentSectionMeta.eyebrow}</span>
+                <h1>{currentSectionMeta.title}</h1>
+                <p>{currentSectionMeta.description}</p>
               </div>
-              <div className="header-badge"><Icon name="bolt" size={16} /> Instalacja nN</div>
+              <div className="header-visual" aria-hidden="true">
+                <div className="header-visual-grid">
+                  <span />
+                  <span />
+                  <span />
+                  <span />
+                </div>
+                <div className="header-visual-meter">
+                  <strong>{activeSection === 'lightning' ? 'LPS' : activeSection === 'wlz' ? 'WLZ' : activeSection === 'cable' ? 'Iz' : 'nN'}</strong>
+                  <span>moduł</span>
+                </div>
+              </div>
             </header>
 
+            {activeSection === 'quick' && (
             <section className="quick-card">
               <div className="quick-card-heading">
                 <div className="quick-icon"><Icon name="bolt" size={19} /></div>
                 <div>
-                  <h2>Szybkie obliczenie rozdzielni</h2>
-                  <p>Wpisz łączną moc rozdzielni, aby od razu obliczyć prąd.</p>
+                  <h2>Bilans mocy rozdzielnicy</h2>
+                  <p>Wpisz Pi i kj, aby od razu wyznaczyć Ps oraz In.</p>
                 </div>
               </div>
               <div className="quick-form">
                 <label className="quick-field">
-                  <span>Moc rozdzielni</span>
+                  <span>Pi · moc zainstalowana</span>
                   <div className="quick-unit-input">
                     <input
                       aria-label="Łączna moc rozdzielni w kilowatach"
@@ -289,6 +405,17 @@ function App() {
                     />
                     <strong>kW</strong>
                   </div>
+                </label>
+                <label className="quick-field">
+                  <span>kj · współczynnik jednoczesności</span>
+                  <input
+                    aria-label="Współczynnik jednoczesności"
+                    min="0"
+                    onChange={(event) => setQuickSimultaneityFactor(event.target.value)}
+                    step="0.01"
+                    type="number"
+                    value={quickSimultaneityFactor}
+                  />
                 </label>
                 <label className="quick-field">
                   <span>Rodzaj zasilania</span>
@@ -308,11 +435,11 @@ function App() {
                   <strong>{formatPower(quickPowerWatts / 1000)} <b>kW</b></strong>
                 </div>
                 <div>
-                  <span>Ps · Moc szczytowa</span>
+                  <span>Ps · moc szczytowa</span>
                   <strong>{formatPower(quickDemandPower / 1000)} <b>kW</b></strong>
                 </div>
                 <div className="quick-summary-highlight">
-                  <span>In · Prąd znamionowy</span>
+                  <span>In · prąd znamionowy</span>
                   <strong>{formatNumber(quickNominalCurrent)} <b>A</b></strong>
                 </div>
               </div>
@@ -322,7 +449,10 @@ function App() {
                 {quickSupply === 'three-phase' ? '(400 V × √3 × 0,93)' : '(230 V × 0,93)'}
               </div>
             </section>
+            )}
 
+            {activeSection === 'circuits' && (
+            <>
             <section className="section-heading">
               <div>
                 <span className="section-number">01</span>
@@ -459,7 +589,11 @@ function App() {
               <span>Suma prądów obliczeniowych obwodów</span>
               <strong>{formatNumber(totals.currents)} A</strong>
             </div>
+            </>
+            )}
 
+            {activeSection === 'cable' && (
+            <>
             <section className="section-heading cable-heading">
               <div>
                 <span className="section-number">03</span>
@@ -510,6 +644,18 @@ function App() {
                   </select>
                 </label>
                 <label className="quick-field">
+                  <span>Prąd znamionowy zabezpieczenia</span>
+                  <select
+                    aria-label="Prąd znamionowy zabezpieczenia"
+                    onChange={(event) => setBreakerRating(Number(event.target.value))}
+                    value={breakerRating}
+                  >
+                    {breakerRatings.map((rating) => (
+                      <option key={rating} value={rating}>{rating} A</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="quick-field">
                   <span>Rodzaj przewodu</span>
                   <select
                     aria-label="Rodzaj przewodu"
@@ -541,24 +687,26 @@ function App() {
                 </article>
                 <article>
                   <span>Wyłącznik nadprądowy</span>
-                  <strong>{breakerRating ? `${breakerCurve}${breakerRating}` : '—'} <b>{breakerRating ? 'A' : ''}</b></strong>
+                  <strong>{breakerCurve}{breakerRating} <b>A</b></strong>
                 </article>
                 <article className="cable-highlight">
-                  <span>Przewód {cableType === 'N2XH' ? 'N2XH' : 'YDY / CYY / NYM'}</span>
+                  <span>Minimalny przewód {cableType === 'N2XH' ? 'N2XH' : 'YDY / CYY / NYM'}</span>
                   <strong>{selectedCable ? `${selectedCable.section} mm²` : '—'}</strong>
                   <p>
                     {selectedCableCapacity
                       ? `Iz = ${formatNumber(selectedCableCapacity, 1)} A · ${loadedCores} obciążone żyły · metoda ${installationMethod}`
-                      : 'Wpisz moc mieszczącą się w zakresie tabeli.'}
+                      : 'Brak przewodu mieszczącego się w zakresie tabeli.'}
                   </p>
                 </article>
               </div>
-              <div className="breaker-rule">
+              <div className={`breaker-rule ${devicePowerWatts > 0 && !breakerCoversLoad ? 'invalid' : ''}`}>
                 <strong>Reguła doboru: Ib ≤ In ≤ Iz</strong>
                 <span>
-                  {breakerRating && selectedCableCapacity
-                    ? `${formatNumber(deviceCurrent)} A ≤ ${breakerRating} A ≤ ${formatNumber(selectedCableCapacity, 1)} A`
-                    : 'Wpisz moc urządzenia, aby sprawdzić warunek doboru.'}
+                  {devicePowerWatts > 0 && selectedCableCapacity
+                    ? `${formatNumber(deviceCurrent)} A ${breakerCoversLoad ? '≤' : '>'} ${breakerRating} A ≤ ${formatNumber(selectedCableCapacity, 1)} A`
+                    : selectedCableCapacity
+                      ? `Wybrano ${breakerCurve}${breakerRating} A. Wpisz moc urządzenia, aby sprawdzić Ib.`
+                      : 'Brak przewodu mieszczącego się w zakresie tabeli.'}
                 </span>
               </div>
               <p className="cable-note">
@@ -567,6 +715,118 @@ function App() {
                 {cableType === 'PVC' && ' Dla YDY / CYY / NYM przyjęto izolację PVC, temperaturę żyły 70°C oraz temperaturę otoczenia 30°C w powietrzu.'}
               </p>
             </section>
+            </>
+            )}
+
+            {activeSection === 'lightning' && (
+            <>
+            <section className="section-heading lightning-heading">
+              <div>
+                <span className="section-number">04</span>
+                <div>
+                  <h2>Przewody odprowadzające instalacji odgromowej</h2>
+                  <p>Oszacuj liczbę połączeń instalacji odgromowej z układem uziemiającym.</p>
+                </div>
+              </div>
+            </section>
+
+            <section className="lightning-card">
+              <div className="lightning-form">
+                <label className="quick-field">
+                  <span>Bok budynku A</span>
+                  <div className="quick-unit-input">
+                    <input
+                      aria-label="Długość boku A budynku w metrach"
+                      min="0"
+                      onChange={(event) => setBuildingSideA(event.target.value)}
+                      placeholder="np. 20"
+                      step="0.1"
+                      type="number"
+                      value={buildingSideA}
+                    />
+                    <strong>m</strong>
+                  </div>
+                </label>
+                <label className="quick-field">
+                  <span>Bok budynku B</span>
+                  <div className="quick-unit-input">
+                    <input
+                      aria-label="Długość boku B budynku w metrach"
+                      min="0"
+                      onChange={(event) => setBuildingSideB(event.target.value)}
+                      placeholder="np. 10"
+                      step="0.1"
+                      type="number"
+                      value={buildingSideB}
+                    />
+                    <strong>m</strong>
+                  </div>
+                </label>
+                <label className="quick-field">
+                  <span>Klasa LPS</span>
+                  <select
+                    aria-label="Klasa instalacji odgromowej LPS"
+                    onChange={(event) => setLpsClass(event.target.value as LpsClass)}
+                    value={lpsClass}
+                  >
+                    <option value="I">LPS I · odstęp 10 m</option>
+                    <option value="II">LPS II · odstęp 10 m</option>
+                    <option value="III">LPS III · odstęp 15 m</option>
+                    <option value="IV">LPS IV · odstęp 20 m</option>
+                  </select>
+                </label>
+              </div>
+
+              <div className="lightning-summary">
+                <article>
+                  <span>Obwód budynku</span>
+                  <strong>{formatNumber(buildingPerimeter, 1)} <b>m</b></strong>
+                </article>
+                <article>
+                  <span>Preferowany odstęp · LPS {lpsClass}</span>
+                  <strong>{preferredLpsSpacing} <b>m</b></strong>
+                </article>
+                <article className="lightning-highlight">
+                  <span>Minimalna liczba przewodów odprowadzających</span>
+                  <strong>{minimumDownConductors || '—'}</strong>
+                  <p>
+                    {minimumDownConductors
+                      ? `Średni odstęp po obwodzie: ${formatNumber(averageDownConductorSpacing, 1)} m`
+                      : 'Wpisz wymiary budynku, aby uzyskać wynik.'}
+                  </p>
+                </article>
+              </div>
+
+              <div className="lightning-layout">
+                <div>
+                  <strong>Układ z uwzględnieniem narożników</strong>
+                  <span>
+                    {cornerAwareDownConductors
+                      ? `${cornerAwareDownConductors} przewodów odprowadzających`
+                      : 'Wpisz oba boki budynku.'}
+                  </span>
+                </div>
+                <p>
+                  Wartość praktyczna zakłada przewód przy każdym narożniku oraz dodatkowe przewody
+                  na bokach, jeżeli wymaga tego preferowany odstęp.
+                </p>
+              </div>
+
+              <p className="lightning-note">
+                Obliczenie ma charakter orientacyjny dla prostokątnego rzutu budynku. Wynik oznacza
+                liczbę przewodów odprowadzających łączących instalację odgromową z układem
+                uziemiającym, a nie liczbę osobnych uziomów. Rozmieszczenie należy zweryfikować
+                w projekcie zgodnie z PN-EN IEC 62305-3.
+              </p>
+            </section>
+            </>
+            )}
+
+            {activeSection === 'wlz' && (
+            <div>
+              <TechnicalCalculations />
+            </div>
+            )}
           </>
         ) : (
           <section className="formulas-page">
